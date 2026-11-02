@@ -1193,4 +1193,3 @@ else:
         "5. Yol xətləri seçilibsə, proqram hər yol tipi üçün xəttə ən yaxın nöqtəni tapacaq."
     )
     st.caption("Məkan məlumatları: Geoapify və © OpenStreetMap contributors.su obyektləri yerli OSM PBF faylından götürülür; tamlıq OSM xəritələnməsindən asılıdır.")
-st.caption("Məkan məlumatları: Geoapify və © OpenStreetMap contributors.su obyektləri yerli OSM PBF faylından götürülür; tamlıq OSM xəritələnməsindən asılıdır.")
