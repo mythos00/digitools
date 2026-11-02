@@ -29,6 +29,24 @@ ROADS_FILE = Path(__file__).parent / "data" / "roads.parquet"
 ROAD_CATEGORY = "Yol xətləri"
 WATER_CATEGORY = "Su obyektləri"
 WATER_FILE = Path(__file__).parent / "data" / "water.parquet"
+REVERSE_GEOCODE_URL = "https://api.geoapify.com/v1/geocode/reverse"
+
+ADMIN_CENTERS = [
+    "Abşeron", "Ağdam", "Ağdaş", "Ağcabədi", "Ağstafa", "Ağsu",
+    "Astara", "Babək", "Balakən", "Bərdə", "Beyləqan", "Biləsuvar",
+    "Cəbrayıl", "Cəlilabad", "Culfa", "Daşkəsən", "Füzuli", "Gədəbəy",
+    "Goranboy", "Göyçay", "Göygöl", "Hacıqabul", "Xaçmaz", "Xızı",
+    "Xocalı", "Xocavənd", "İmişli", "İsmayıllı", "Kəlbəcər", "Kəngərli",
+    "Kürdəmir", "Qəbələ", "Qax", "Qazax", "Qobustan", "Quba",
+    "Qubadlı", "Qusar", "Laçın", "Lənkəran", "Lerik", "Masallı",
+    "Neftçala", "Oğuz", "Ordubad", "Saatlı", "Sabirabad", "Sədərək",
+    "Salyan", "Samux", "Şabran", "Şahbuz", "Şəki", "Şamaxı",
+    "Şəmkir", "Şərur", "Şuşa", "Siyəzən", "Tərtər", "Tovuz",
+    "Ucar", "Yardımlı", "Yevlax", "Zəngilan", "Zaqatala", "Zərdab",
+    "Bakı", "Gəncə", "Mingəçevir", "Naftalan", "Naxçıvan",
+    "Sumqayıt", "Şirvan", "Xankəndi", "Xırdalan", "Ağdərə",
+    "Dəliməmmədli", "Göytəpə", "Horadiz", "Xudat", "Liman", "Əsgəran"
+]
 
 # Streamlit Community Cloud -> App settings -> Secrets bölməsinə əlavə et:
 # GEOAPIFY_API_KEY = "sənin_yeni_api_açarın"
@@ -102,6 +120,72 @@ def safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_admin_centers(api_key):
+    centers = []
+
+    for name in ADMIN_CENTERS:
+        try:
+            response = requests.get(
+                GEOCODE_URL,
+                params={
+                    "text": f"{name}, Azərbaycan",
+                    "filter": "countrycode:az",
+                    "format": "json",
+                    "limit": 5,
+                    "apiKey": api_key,
+                },
+                timeout=(5, 15),
+            )
+            response.raise_for_status()
+
+            results = response.json().get("results", [])
+
+            if not results:
+                continue
+
+            # Eyni adlı şəhər və kəndlər ola bilər.
+            # İlk uyğun Azərbaycan nəticəsini götürürük.
+            item = results[0]
+
+            centers.append({
+                "name": name,
+                "lat": float(item["lat"]),
+                "lon": float(item["lon"]),
+            })
+
+        except (requests.RequestException, KeyError, ValueError, TypeError):
+            continue
+
+    return centers
+
+
+def get_admin_center(lat, lon, api_key):
+    centers = get_admin_centers(api_key)
+
+    if not centers:
+        return None
+
+    nearest_center = None
+    min_distance = float("inf")
+
+    for center in centers:
+        distance = geodesic(
+            (lat, lon),
+            (center["lat"], center["lon"])
+        ).km
+
+        if distance < min_distance:
+            min_distance = distance
+            nearest_center = center.copy()
+
+    if nearest_center is None:
+        return None
+
+    nearest_center["distance_km"] = round(min_distance, 2)
+
+    return nearest_center
 
 # ---------------- GEOCODING ----------------
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -204,6 +288,7 @@ def analyze_features(features, origin_lat, origin_lon, selected_categories):
             "_id": str(place_id),
             "_line_coords": None,
             "_geojson": None,
+            "_api_categories": api_cats,
         })
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
 
@@ -548,6 +633,186 @@ def find_water_features(origin_lat, origin_lon, radius_km, water):
         return pd.DataFrame(columns=RESULT_COLUMNS)
     return pd.DataFrame(rows, columns=RESULT_COLUMNS).sort_values("Məsafə (km)").reset_index(drop=True)
 
+# ---------------- SUMMARY TABLE ----------------
+
+SUMMARY_COLUMNS = [
+    "Torpaq ID",
+    "Yerləşdiyi rayon və ya şəhər",
+    "Rayon/şəhər mərkəzinə məsafə (km)",
+    "Ən yaxın yol",
+    "Ən yaxın yolun növü",
+    "Ən yaxın yola məsafə (km)",
+    "Ən yaxın magistral yol",
+    "Magistral yola məsafə (km)",
+    "Ən yaxın əsas yol",
+    "Əsas yola məsafə (km)",
+    "Ən yaxın çay",
+    "Çaya məsafə (km)",
+    "Ən yaxın kanal",
+    "Kanala məsafə (km)",
+    "Ən yaxın göl",
+    "Gölə məsafə (km)",
+    "Ən yaxın su anbarı",
+    "Su anbarına məsafə (km)",
+    "Ən yaxın yanacaqdoldurma məntəqəsi",
+    "Yanacaqdoldurma məntəqəsinə məsafə (km)",
+    "Ən yaxın polis məntəqəsi",
+    "Polis məntəqəsinə məsafə (km)",
+    "Ən yaxın yanğınsöndürmə məntəqəsi",
+    "Yanğınsöndürmə məntəqəsinə məsafə (km)",
+    "Ən yaxın xəstəxana və ya klinika",
+    "Xəstəxana və ya klinikaya məsafə (km)",
+    "Ən yaxın mağaza",
+    "Mağazaya məsafə (km)",
+]
+
+
+def nearest_item(results, category=None, road_type=None):
+    if results.empty:
+        return None
+
+    data = results.copy()
+
+    if category:
+        data = data[data["Kateqoriya"] == category]
+
+    if road_type:
+        data = data[data["Yol növü"].astype(str).str.contains(
+            road_type, case=False, na=False
+        )]
+
+    if data.empty:
+        return None
+
+    return data.sort_values("Məsafə (km)").iloc[0]
+
+
+def water_type(kind):
+    value = str(kind).lower()
+
+    if "river" in value or "stream" in value:
+        return "çay"
+
+    if "canal" in value or "ditch" in value:
+        return "kanal"
+
+    if "reservoir" in value:
+        return "su anbarı"
+
+    if "lake" in value or "pond" in value:
+        return "göl"
+
+    return None
+
+
+def build_summary_table(results, location, admin_info):
+    row = {column: None for column in SUMMARY_COLUMNS}
+
+    # Torpaq ID: daxil edilmiş koordinatlar əsasında unikal identifikator
+    row["Torpaq ID"] = (
+        f"{location['lat']:.6f}_{location['lon']:.6f}"
+    )
+
+    if admin_info:
+        row["Yerləşdiyi rayon və ya şəhər"] = admin_info["name"]
+        row["Rayon/şəhər mərkəzinə məsafə (km)"] = admin_info["distance_km"]
+
+    # Ən yaxın yol
+    road = nearest_item(results, ROAD_CATEGORY)
+
+    if road is not None:
+        row["Ən yaxın yol"] = road["Obyekt"]
+        row["Ən yaxın yolun növü"] = road["Yol növü"]
+        row["Ən yaxın yola məsafə (km)"] = road["Məsafə (km)"]
+
+    # Magistral yol
+    motorway = nearest_item(results, ROAD_CATEGORY, "Magistral yol")
+
+    if motorway is not None:
+        row["Ən yaxın magistral yol"] = motorway["Obyekt"]
+        row["Magistral yola məsafə (km)"] = motorway["Məsafə (km)"]
+
+    # Əsas yol
+    primary = nearest_item(results, ROAD_CATEGORY, "Əsas yol")
+
+    if primary is not None:
+        row["Ən yaxın əsas yol"] = primary["Obyekt"]
+        row["Əsas yola məsafə (km)"] = primary["Məsafə (km)"]
+
+    # Su obyektləri
+    if not results.empty:
+        waters = results[results["Kateqoriya"] == WATER_CATEGORY].copy()
+
+        if not waters.empty:
+            waters["_water_type"] = waters["Yol növü"].apply(water_type)
+
+            water_columns = {
+                "çay": ("Ən yaxın çay", "Çaya məsafə (km)"),
+                "kanal": ("Ən yaxın kanal", "Kanala məsafə (km)"),
+                "göl": ("Ən yaxın göl", "Gölə məsafə (km)"),
+                "su anbarı": ("Ən yaxın su anbarı", "Su anbarına məsafə (km)"),
+            }
+
+            for kind, columns in water_columns.items():
+                matches = waters[waters["_water_type"] == kind]
+
+                if not matches.empty:
+                    item = matches.sort_values("Məsafə (km)").iloc[0]
+                    row[columns[0]] = item["Obyekt"]
+                    row[columns[1]] = item["Məsafə (km)"]
+
+    # Digər obyektlər
+    category_columns = {
+        "Yanacaqdoldurma məntəqələri": (
+            "Ən yaxın yanacaqdoldurma məntəqəsi",
+            "Yanacaqdoldurma məntəqəsinə məsafə (km)",
+        ),
+        "Yanğın və polis xidmətləri": None,
+        "Xəstəxana və klinikalar": (
+            "Ən yaxın xəstəxana və ya klinika",
+            "Xəstəxana və ya klinikaya məsafə (km)",
+        ),
+        "Mağazalar və marketlər": (
+            "Ən yaxın mağaza",
+            "Mağazaya məsafə (km)",
+        ),
+    }
+
+    for category, columns in category_columns.items():
+        if columns is None:
+            continue
+
+        item = nearest_item(results, category)
+
+        if item is not None:
+            row[columns[0]] = item["Obyekt"]
+            row[columns[1]] = item["Məsafə (km)"]
+
+    # Polis və yanğınsöndürmə ayrıca
+    services = results[
+        results["Kateqoriya"] == "Yanğın və polis xidmətləri"
+    ] if not results.empty else pd.DataFrame()
+
+    if not services.empty:
+        for _, item in services.iterrows():
+            name = str(item["Obyekt"]).lower()
+            # Kateqoriya nəticəsində obyekt adı ilə müəyyən etmək həmişə mümkün deyil.
+            # Buna görə obyektin API kateqoriyasını ayrıca saxlamaq daha dəqiq olar.
+            if "polis" in name or "police" in name:
+                column_name = "Ən yaxın polis məntəqəsi"
+                distance_name = "Polis məntəqəsinə məsafə (km)"
+                if row[column_name] is None or item["Məsafə (km)"] < row[distance_name]:
+                    row[column_name] = item["Obyekt"]
+                    row[distance_name] = item["Məsafə (km)"]
+
+            elif "yanğın" in name or "fire" in name:
+                column_name = "Ən yaxın yanğınsöndürmə məntəqəsi"
+                distance_name = "Yanğınsöndürmə məntəqəsinə məsafə (km)"
+                if row[column_name] is None or item["Məsafə (km)"] < row[distance_name]:
+                    row[column_name] = item["Obyekt"]
+                    row[distance_name] = item["Məsafə (km)"]
+
+    return pd.DataFrame([row], columns=SUMMARY_COLUMNS)
 
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
@@ -597,6 +862,13 @@ if search_button:
             if location is None:
                 st.error("Lokasiya tapılmadı. Şəhər/kənd adı və ya 40.4093, 49.8671 formatında koordinat daxil edin.")
             else:
+                with st.spinner("Ən yaxın rayon/şəhər mərkəzi müəyyən edilir..."):
+                    admin_info = get_admin_center(
+                        location["lat"],
+                        location["lon"],
+                        API_KEY
+                    )
+
                 road_results = pd.DataFrame(columns=RESULT_COLUMNS)
                 if ROAD_CATEGORY in selected_categories:
                     roads = load_road_lines()
@@ -631,6 +903,7 @@ if search_button:
                 st.session_state["land_location"] = location
                 st.session_state["land_radius"] = radius_km
                 st.session_state["land_results"] = results
+                st.session_state["land_admin_info"] = admin_info
                 st.session_state["land_unsupported"] = [c for c in UNSUPPORTED_CATEGORIES if c in selected_categories]
                 st.session_state["land_search_error"] = None
         except requests.HTTPError as exc:
@@ -642,6 +915,120 @@ if search_button:
             st.session_state["land_search_error"] = f"Xəta: {exc}"
 
 # ---------------- RESULTS ----------------
+def build_summary_table(results, location, admin_info):
+    import pandas as pd
+
+    def nearest(category=None, road_type=None, water_type=None):
+        if results is None or results.empty:
+            return None
+
+        df = results.copy()
+
+        if category:
+            df = df[df["Kateqoriya"] == category]
+
+        if road_type:
+            df = df[df["Yol növü"] == road_type]
+
+        if water_type:
+            df = df[
+                df["Yol növü"].astype(str).str.lower().str.contains(
+                    water_type, na=False
+                )
+            ]
+
+        if df.empty:
+            return None
+
+        return df.sort_values("Məsafə (km)").iloc[0]
+
+    def name(item):
+        return item["Obyekt"] if item is not None else "Tapılmadı"
+
+    def distance(item):
+        return round(float(item["Məsafə (km)"]), 2) if item is not None else None
+
+    nearest_road = nearest(ROAD_CATEGORY)
+
+    motorway_types = [
+    "Magistral yol",
+    "Magistral yola giriş/çıxış",
+    "Əsas magistral yol",
+    "Əsas yola giriş/çıxış",
+]
+
+    motorway_candidates = results[
+        (results["Kateqoriya"] == ROAD_CATEGORY) &
+        (results["Yol növü"].isin(motorway_types))
+    ].copy()
+
+    motorway = (
+        motorway_candidates.sort_values("Məsafə (km)").iloc[0]
+        if not motorway_candidates.empty
+        else None
+    )
+    main_road = nearest(ROAD_CATEGORY, road_type="Əsas yol")
+
+    river = nearest(WATER_CATEGORY, water_type="river")
+    canal = nearest(WATER_CATEGORY, water_type="canal")
+    lake = nearest(WATER_CATEGORY, water_type="lake")
+    reservoir = nearest(WATER_CATEGORY, water_type="reservoir")
+
+    fuel = nearest("Yanacaqdoldurma məntəqələri")
+    police = nearest("Yanğın və polis xidmətləri")
+    district = ""
+    if isinstance(admin_info, dict):
+        district = (
+            admin_info.get("name")
+            or admin_info.get("display_name")
+            or ""
+        )
+
+    summary = {
+        "Yerləşdiyi rayon və ya şəhər": (
+            admin_info.get("name", "Tapılmadı")
+            if isinstance(admin_info, dict) and admin_info
+            else "Tapılmadı"
+        ),
+
+        "Rayon və ya şəhər mərkəzinə məsafə (km)": (
+            round(admin_info["distance_km"], 2)
+            if isinstance(admin_info, dict)
+            and admin_info.get("distance_km") is not None
+            else None
+        ),
+        "Ən yaxın yol": name(nearest_road),
+        "Ən yaxın yolun növü": (
+            nearest_road["Yol növü"] if nearest_road is not None else "Tapılmadı"
+        ),
+        "Ən yaxın yola məsafə (km)": distance(nearest_road),
+
+        "Ən yaxın magistral yol": name(motorway),
+        "Magistral yola məsafə (km)": distance(motorway),
+
+        "Ən yaxın əsas yol": name(main_road),
+        "Əsas yola məsafə (km)": distance(main_road),
+
+        "Ən yaxın çay": name(river),
+        "Çaya məsafə (km)": distance(river),
+
+        "Ən yaxın kanal": name(canal),
+        "Kanala məsafə (km)": distance(canal),
+
+        "Ən yaxın göl": name(lake),
+        "Gölə məsafə (km)": distance(lake),
+
+        "Ən yaxın su anbarı": name(reservoir),
+        "Su anbarına məsafə (km)": distance(reservoir),
+
+        "Ən yaxın yanacaqdoldurma məntəqəsi": name(fuel),
+        "Yanacaqdoldurma məntəqəsinə məsafə (km)": distance(fuel),
+
+        "Ən yaxın polis/yanğın söndürmə məntəqəsi": name(police),
+        "Polis/yanğın söndürmə məntəqəsinə məsafə (km)": distance(police),
+    }
+
+    return pd.DataFrame([summary])
 if st.session_state.get("land_search_error"):
     st.error(st.session_state["land_search_error"])
 
@@ -652,6 +1039,22 @@ if "land_location" in st.session_state and "land_results" in st.session_state:
     st.subheader("📍 Analiz edilən lokasiya")
     st.write(location["name"])
     st.caption(f"Koordinatlar: {location['lat']:.6f}, {location['lon']:.6f} | Radius: {radius_used} km")
+    admin_info = st.session_state.get("land_admin_info")
+
+    if admin_info:
+        col1, col2 = st.columns(2)
+
+        col1.metric(
+            "Ən yaxın rayon/şəhər mərkəzi",
+            admin_info["name"]
+        )
+
+        col2.metric(
+            "Mərkəzə məsafə",
+            distance_text(admin_info["distance_km"])
+        )
+    else:
+        st.warning("Rayon/şəhər mərkəzi müəyyən edilə bilmədi.")
 
     if results.empty:
         st.warning("Bu radiusda seçilmiş kateqoriyalar üzrə nəticə tapılmadı. Radiusu artırın və ya kateqoriyaları yoxlayın.")
@@ -685,6 +1088,33 @@ if "land_location" in st.session_state and "land_results" in st.session_state:
             use_container_width=True, hide_index=True,
             column_config={"Xəritə": st.column_config.LinkColumn("Xəritədə aç", display_text="Google Maps")},
         )
+
+
+            # ÜMUMİ MƏLUMAT CƏDVƏLİ
+    st.subheader("Torpaq sahəsi üzrə ümumi məlumat")
+
+    summary_df = build_summary_table(
+        results,
+        location,
+        admin_info
+    )
+
+    st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.download_button(
+        label="Ümumi cədvəli CSV formatında yüklə",
+        data=summary_df.to_csv(
+            index=False,
+            encoding="utf-8-sig"
+        ).encode("utf-8-sig"),
+        file_name="torpaq_umumi_melumat.csv",
+        mime="text/csv"
+    )
+        
 
     # ---------------- MAP ----------------
     st.subheader("🗺️ Xəritə")
@@ -762,4 +1192,5 @@ else:
         "4. **Analiz et** düyməsinə basın.\n"
         "5. Yol xətləri seçilibsə, proqram hər yol tipi üçün xəttə ən yaxın nöqtəni tapacaq."
     )
+    st.caption("Məkan məlumatları: Geoapify və © OpenStreetMap contributors.su obyektləri yerli OSM PBF faylından götürülür; tamlıq OSM xəritələnməsindən asılıdır.")
 st.caption("Məkan məlumatları: Geoapify və © OpenStreetMap contributors.su obyektləri yerli OSM PBF faylından götürülür; tamlıq OSM xəritələnməsindən asılıdır.")
